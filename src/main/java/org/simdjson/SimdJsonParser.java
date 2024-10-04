@@ -1,5 +1,7 @@
 package org.simdjson;
 
+import lombok.Getter;
+
 public class SimdJsonParser {
 
     private static final int PADDING = 64;
@@ -24,7 +26,12 @@ public class SimdJsonParser {
         paddedBuffer = new byte[capacity];
         indexer = new StructuralIndexer(bitIndexes);
     }
-
+    public BitIndexes buildBitIndex (byte[] buffer, int len) {
+        byte[] padded = padIfNeeded(buffer, len);
+        reset();
+        stage1(padded, len);
+        return bitIndexes;
+    }
     public <T> T parse(byte[] buffer, int len, Class<T> expectedType) {
         byte[] padded = padIfNeeded(buffer, len);
         reset();
