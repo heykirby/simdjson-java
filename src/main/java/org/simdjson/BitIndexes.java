@@ -1,5 +1,7 @@
 package org.simdjson;
 
+import java.util.Arrays;
+
 public class BitIndexes {
 
     private final int[] indexes;

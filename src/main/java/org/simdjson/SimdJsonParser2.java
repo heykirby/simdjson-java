@@ -29,21 +29,22 @@ public class SimdJsonParser2 {
     private final String[] emptyResult;
     private JsonNode ptr;
     private byte[] buffer;
-    private final int targetParseNum;
+    private final int expectParseCols;
+    // every time json string is processed, currentVersion will be incremented by 1
     private long currentVersion = 0;
     // pruning, when alreadyProcessedCols == NUM
-    private long alreadyProcessedCols = 0;
+    private long parseCols = 0;
 
     public SimdJsonParser2(String... args) {
         parser = new SimdJsonParser();
-        targetParseNum = args.length;
-        row = new JsonNode[targetParseNum];
-        result = new String[targetParseNum];
-        emptyResult = new String[targetParseNum];
+        expectParseCols = args.length;
+        row = new JsonNode[expectParseCols];
+        result = new String[expectParseCols];
+        emptyResult = new String[expectParseCols];
         for (int i = 0; i < args.length; i++) {
             emptyResult[i] = null;
         }
-        for (int i = 0; i < targetParseNum; i++) {
+        for (int i = 0; i < expectParseCols; i++) {
             JsonNode cur = root;
             String[] paths = args[i].split("\\.");
             for (int j = 0; j < paths.length; j++) {
@@ -65,7 +66,7 @@ public class SimdJsonParser2 {
         if (buffer == null || buffer.length == 0) {
             return emptyResult;
         }
-        this.alreadyProcessedCols = 0;
+        this.parseCols = 0;
         this.currentVersion++;
         this.ptr = root;
         this.buffer = buffer;
@@ -84,22 +85,34 @@ public class SimdJsonParser2 {
         return getResult();
     }
 
-    private void parseElement(String fieldName) {
-        if (fieldName == null) {
-            int start = bitIndexes.advance();
-            int realEnd = bitIndexes.advance();
-            while (realEnd > start) {
-                if (buffer[--realEnd] == '"') {
-                    break;
-                }
-            }
-            fieldName = new String(buffer, start + 1, realEnd - start - 1);
+    private String parseField() {
+        int start = bitIndexes.advance();
+        int next = bitIndexes.peek();
+        String field = new String(buffer, start, next - start).trim();
+        if ("null".equalsIgnoreCase(field)) {
+            return null;
         }
-        if (!ptr.getChildren().containsKey(fieldName)) {
+        // field type is string or type is decimal
+        if (field.startsWith("\"")) {
+            field = field.substring(1, field.length() - 1);
+        }
+        return field;
+    }
+
+    private void parseElement(String expectFieldName) {
+        if (parseCols >= expectParseCols) {
+            return;
+        }
+        // if expectFieldName is null, parent is map, else is list
+        if (expectFieldName == null) {
+            expectFieldName = parseField();
+            bitIndexes.advance(); // skip :
+        }
+        if (!ptr.getChildren().containsKey(expectFieldName)) {
             skip(false);
             return;
         }
-        ptr = ptr.getChildren().get(fieldName);
+        ptr = ptr.getChildren().get(expectFieldName);
         switch (buffer[bitIndexes.peek()]) {
             case '{' -> {
                 parseMap();
@@ -110,7 +123,7 @@ public class SimdJsonParser2 {
             default -> {
                 ptr.setValue(skip(true));
                 ptr.setVersion(currentVersion);
-                ++alreadyProcessedCols;
+                ++parseCols;
             }
         }
         ptr = ptr.getParent();
@@ -120,12 +133,12 @@ public class SimdJsonParser2 {
         if (ptr.getChildren() == null) {
             ptr.setValue(skip(true));
             ptr.setVersion(currentVersion);
-            ++alreadyProcessedCols;
+            ++parseCols;
             return;
         }
         ptr.setStart(bitIndexes.peek());
         bitIndexes.advance();
-        while (bitIndexes.hasNext() && buffer[bitIndexes.peek()] != '}' && alreadyProcessedCols < targetParseNum) {
+        while (bitIndexes.hasNext() && buffer[bitIndexes.peek()] != '}' && parseCols <= expectParseCols) {
             parseElement(null);
             if (buffer[bitIndexes.peek()] == ',') {
                 bitIndexes.advance();
@@ -135,7 +148,7 @@ public class SimdJsonParser2 {
         if (ptr.isLeaf()) {
             ptr.setValue(new String(buffer, ptr.getStart(), ptr.getEnd() - ptr.getStart() + 1));
             ptr.setVersion(currentVersion);
-            ++alreadyProcessedCols;
+            ++parseCols;
         }
         bitIndexes.advance();
     }
@@ -144,13 +157,13 @@ public class SimdJsonParser2 {
         if (ptr.getChildren() == null) {
             ptr.setValue(skip(true));
             ptr.setVersion(currentVersion);
-            ++alreadyProcessedCols;
+            ++parseCols;
             return;
         }
         ptr.setStart(bitIndexes.peek());
         bitIndexes.advance();
         int i = 0;
-        while (bitIndexes.hasNext() && buffer[bitIndexes.peek()] != ']' && alreadyProcessedCols < targetParseNum) {
+        while (bitIndexes.hasNext() && buffer[bitIndexes.peek()] != ']' && parseCols <= expectParseCols) {
             parseElement("" + i);
             if (buffer[bitIndexes.peek()] == ',') {
                 bitIndexes.advance();
@@ -161,7 +174,7 @@ public class SimdJsonParser2 {
         if (ptr.isLeaf()) {
             ptr.setValue(new String(buffer, ptr.getStart(), ptr.getEnd() - ptr.getStart() + 1));
             ptr.setVersion(currentVersion);
-            ++alreadyProcessedCols;
+            ++parseCols;
         }
         bitIndexes.advance();
     }
@@ -198,32 +211,14 @@ public class SimdJsonParser2 {
                 bitIndexes.advance();
                 return retainValue ? new String(buffer, start, end - start + 1) : null;
             }
-            case '"' -> {
-                bitIndexes.advance();
-                int realEnd = bitIndexes.peek();
-                while (realEnd > start) {
-                    if (buffer[--realEnd] == '"') {
-                        break;
-                    }
-                }
-                return retainValue ? new String(buffer, start + 1, realEnd - start - 1) : null;
-            }
             default -> {
-                bitIndexes.advance();
-                int realEnd = bitIndexes.peek();
-                while (realEnd >= start) {
-                    --realEnd;
-                    if (buffer[realEnd] >= '0' && buffer[realEnd] <= '9') {
-                        break;
-                    }
-                }
-                return retainValue ? new String(buffer, start, realEnd - start + 1) : null;
+                return parseField();
             }
         }
     }
 
     private String[] getResult() {
-        for (int i = 0; i < targetParseNum; i++) {
+        for (int i = 0; i < expectParseCols; i++) {
             if (row[i].getVersion() < currentVersion) {
                 result[i] = null;
                 continue;
